@@ -11,6 +11,11 @@
   各 DSN 部分中出现的**原有顺序**提取，绝不把整封回执归为单一结果。
 - 每个收件人报告块提取 ``Final-Recipient`` / ``Action`` / ``Status``
   / ``Diagnostic-Code`` 四项（字段名大小写不敏感，保留折行原文）。
+- 每个投递状态部分（``message/delivery-status``）的
+  ``Original-Envelope-Id``（RFC 3464 §2.2.1，每消息字段，整个部分内
+  至多一条）一并附加到该部分的每个收件人结果上，并标明
+  ``ok`` / ``missing`` / ``empty`` / ``duplicate`` 状态，供多封回执
+  归并时组成投递键。
 - 分类以 ``Status`` 增强状态码的首位类别为准（RFC 3463）：
   ``2.x.x`` → 成功，``4.x.x`` → 暂缓（临时性），``5.x.x`` → 永久失败。
 - ``Status`` 缺失 / 无法识别，或其类别与 ``Action`` 语义矛盾时，
@@ -114,6 +119,38 @@ def _header_value(block: Message, name: str) -> tuple[str | None, str | None]:
 
 def _header_count(block: Message, name: str) -> int:
     return len(block.get_all(name, []))
+
+
+# Original-Envelope-Id（RFC 3464 §2.2.1）在整个投递状态部分内的取值状态
+OEID_OK = "ok"
+OEID_MISSING = "missing"
+OEID_EMPTY = "empty"
+OEID_DUPLICATE = "duplicate"
+
+
+def _envelope_id_of_part(blocks: list[Message]) -> tuple[str | None, str, int]:
+    """统计一个投递状态部分内所有字段块的 ``Original-Envelope-Id``。
+
+    RFC 3464 规定它是**每消息字段**、整个投递状态部分至多一条。为兼容
+    把该字段误写进收件人块的非标准回执，这里在该部分的**所有字段块**
+    中计数（重复字段名按全部副本计）。
+
+    返回 ``(展开去空白后的值, 状态, 字段出现次数)``，状态为
+    ``ok`` / ``missing`` / ``empty`` / ``duplicate`` 之一；
+    非 ``ok`` 时值为 ``None``。
+    """
+    raw_values: list[str] = []
+    for block in blocks:
+        raw_values.extend(block.get_all("Original-Envelope-Id", []))
+    count = len(raw_values)
+    if count == 0:
+        return None, OEID_MISSING, 0
+    if count > 1:
+        return None, OEID_DUPLICATE, count
+    value = _unfold(raw_values[0])
+    if not value:
+        return None, OEID_EMPTY, count
+    return value, OEID_OK, count
 
 
 def _parse_dsn_blocks(part: Message) -> list[Message]:
@@ -225,6 +262,9 @@ def inspect_dsn(source: str) -> dict:
     # walk() 已按 MIME 文档顺序产出；此处保持各 DSN 部分的原有顺序
     for dsn_index, part in enumerate(dsn_parts, start=1):
         blocks = _parse_dsn_blocks(part)
+        envelope_id, envelope_id_status, envelope_id_count = _envelope_id_of_part(
+            blocks
+        )
         per_message: dict | None = None
         for block_index, block in enumerate(blocks):
             fr_raw, fr_field = _header_value(block, "Final-Recipient")
@@ -309,6 +349,9 @@ def inspect_dsn(source: str) -> dict:
                 "reporting_mta": (
                     per_message["reporting_mta"] if per_message else None
                 ),
+                "original_envelope_id": envelope_id,
+                "original_envelope_id_status": envelope_id_status,
+                "original_envelope_id_count": envelope_id_count,
             }
             recipients.append(entry)
 
