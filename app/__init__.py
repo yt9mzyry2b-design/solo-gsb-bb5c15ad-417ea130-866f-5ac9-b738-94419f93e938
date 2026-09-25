@@ -7,6 +7,7 @@ import os
 from flask import Flask, jsonify, render_template, request
 
 from mailtrace.parsing import (
+    aggregate_dsn,
     analyze_auth_results,
     analyze_headers,
     analyze_trust_boundary,
@@ -22,6 +23,7 @@ from mailtrace.parsing import (
 )
 from mailtrace.parsing.sample import (
     SAMPLE_DSN,
+    SAMPLE_DSN_AGGREGATE,
     SAMPLE_HEADERS,
     SAMPLE_HEADERS_ALIGN,
     SAMPLE_HEADERS_ARC,
@@ -66,6 +68,7 @@ def create_app() -> Flask:
             "sample_authres": SAMPLE_HEADERS_AUTHRES,
             "sample_align": SAMPLE_HEADERS_ALIGN,
             "sample_dsn": SAMPLE_DSN,
+            "sample_dsn_aggregate": SAMPLE_DSN_AGGREGATE,
             "sample_org_domain": SAMPLE_ORG_DOMAIN,
             "max_input_kb": max_input_kb,
         }
@@ -194,6 +197,13 @@ def create_app() -> Flask:
             }
         return inspect_dsn(raw_source)
 
+    def _do_dsn_aggregate(sources: list[str]) -> dict:
+        for idx, raw in enumerate(sources, start=1):
+            error = _check_size(raw, f"第 {idx} 封")
+            if error:
+                return {"error": error}
+        return aggregate_dsn(sources)
+
     @app.post("/analyze")
     def analyze_form():
         raw_headers = request.form.get("headers_a", "") or request.form.get("headers", "")
@@ -319,6 +329,29 @@ def create_app() -> Flask:
         raw_source = request.form.get("source_dsn", "")
         dsn = _do_dsn_inspect(raw_source)
         return render_index(source_dsn=raw_source, dsn=dsn)
+
+    @app.post("/dsn-aggregate")
+    def dsn_aggregate_form():
+        raw_batch = request.form.get("source_dsn_aggregate", "")
+        sources = split_batch_headers(raw_batch)
+        if not sources:
+            dsnagg = {
+                "error": "未识别到任何退信邮件，请用分隔行（如 "
+                "“===== 下一封邮件 =====”）分开至少一封完整原始退信邮件",
+                "message_count": 0,
+                "inspected_count": 0,
+                "message_errors": [],
+                "recipient_total": 0,
+                "merged_recipient_count": 0,
+                "group_count": 0,
+                "unmerged_count": 0,
+                "conflict_count": 0,
+                "groups": [],
+                "unmerged": [],
+            }
+        else:
+            dsnagg = _do_dsn_aggregate(sources)
+        return render_index(source_dsn_aggregate=raw_batch, dsnagg=dsnagg)
 
     @app.post("/api/analyze")
     def analyze_api():
@@ -540,6 +573,36 @@ def create_app() -> Flask:
         result = _do_dsn_inspect(source)
         # 空白、超限、无 message/delivery-status 部分均为 400；
         # 逐收件人的成功 / 暂缓 / 永久失败 / 待核对均为 200
+        status = 400 if result.get("error") else 200
+        return jsonify(result), status
+
+    @app.post("/api/dsn/aggregate")
+    def dsn_aggregate_api():
+        if not request.is_json:
+            return jsonify(
+                {"error": "请使用 application/json 提交 "
+                 "{\"sources\": [完整原始退信邮件, ...]}"}
+            ), 400
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(
+                {"error": "请求体必须是 JSON 对象，含 sources 字符串数组"}
+            ), 400
+        sources = payload.get("sources")
+        if not isinstance(sources, list) or not all(
+            isinstance(item, str) for item in sources
+        ):
+            return jsonify(
+                {"error": "sources 必须是字符串数组"
+                 "（每封完整原始退信邮件一个元素）"}
+            ), 400
+        if len(sources) < 1:
+            return jsonify({"error": "请至少提供一封完整原始退信邮件"}), 400
+        if any(not item.strip() for item in sources):
+            return jsonify({"error": "sources 数组中存在空白项，请删除后重试"}), 400
+        result = _do_dsn_aggregate(sources)
+        # 空白项、超限、所有邮件都无投递状态部分为 400；
+        # 部分邮件无投递状态部分时其余仍归并，整体为 200
         status = 400 if result.get("error") else 200
         return jsonify(result), status
 

@@ -435,6 +435,18 @@
     font-size: 13px; background: #2e1065; color: #ddd6fe;
     border: 1px solid #6d28d9;
   }
+
+  /* 多封退信回执归并 */
+  .dsn-row.conflict {
+    border-left: 4px solid #f472b6;
+    background: rgba(244, 114, 182, 0.07);
+  }
+  .dsn-badge.conflict { background: #f472b6; color: #500724; }
+  .dsn-trajectory { margin-top: 10px; display: grid; gap: 8px; }
+  .dsn-event {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px;
+  }
 </style>
 </head>
 <body>
@@ -655,6 +667,30 @@
       <button class="btn-ghost" type="button" id="fillDsnSample">填入示例</button>
       <button class="btn-ghost" type="button" id="clearDsn">清空</button>
       <span class="hint" style="align-self:center;">也可调用 <code>POST /api/dsn/inspect</code>（JSON：<code>{"source": "..."}</code>）</span>
+    </div>
+  </form>
+
+  <h2 class="section-title">🗂️ 多封退信回执归并（按投递键合并）</h2>
+  <p class="subtitle" style="margin-bottom:10px;">
+    粘贴<strong>多封完整原始退信邮件</strong>，沿用批量分隔行
+    （<code>===== 下一封邮件 =====</code>，也支持 <code>---</code>、<code>###</code>、<code>***</code>），
+    或调用 <code>POST /api/dsn/aggregate</code>（<code>sources</code> 字符串数组）。
+    系统复用单封判读结果，对每个收件人报告块，以其所属投递状态部分中
+    <strong>唯一且非空</strong>的 <code>Original-Envelope-Id</code> 与
+    <code>Final-Recipient</code> <strong>原值</strong>组成投递键归并；
+    <strong>缺失 / 重复标识</strong>与<strong>待核对块</strong>列入未归并清单并说明原因，
+    不凭收件地址单独合并。每组按输入顺序展示状态轨迹：暂缓可由成功 / 永久失败
+    <strong>结案</strong>；结案后再出现不同类别标为<strong>冲突</strong>，不静默覆盖。
+    某封没有投递状态部分时单独报错，其余邮件仍参与归并。
+  </p>
+  <form method="post" action="/dsn-aggregate" id="dsnAggForm">
+    <textarea name="source_dsn_aggregate" id="source_dsn_aggregate" style="min-height:260px;"
+      placeholder="第 1 封完整原始退信邮件（含 message/delivery-status 部分）……&#10;===== 下一封邮件 =====&#10;第 2 封完整原始退信邮件……&#10;===== 下一封邮件 =====&#10;第 3 封完整原始退信邮件……">{{ source_dsn_aggregate or '' }}</textarea>
+    <div class="toolbar">
+      <button class="btn-dsn" type="submit">归并退信回执（多封）</button>
+      <button class="btn-ghost" type="button" id="fillDsnAggSample">填入示例</button>
+      <button class="btn-ghost" type="button" id="clearDsnAgg">清空</button>
+      <span class="hint" style="align-self:center;">也可调用 <code>POST /api/dsn/aggregate</code>（JSON：<code>{"sources": ["...", "..."]}</code>）</span>
     </div>
   </form>
 
@@ -1580,6 +1616,130 @@
     {% endif %}
   {% endif %}
 
+  {% if dsnagg %}
+    {% if dsnagg.error %}
+      <div class="banner">{{ dsnagg.error }}</div>
+    {% else %}
+      <h2 style="font-size:18px;">多封退信回执归并结果（按投递键合并）</h2>
+      <div class="stats">
+        <div class="stat"><div class="num">{{ dsnagg.inspected_count }} / {{ dsnagg.message_count }}</div><div class="label">参与归并 / 提交邮件</div></div>
+        <div class="stat"><div class="num">{{ dsnagg.recipient_total }}</div><div class="label">收件人报告块</div></div>
+        <div class="stat"><div class="num ok">{{ dsnagg.group_count }}</div><div class="label">归并组（投递键）</div></div>
+        <div class="stat"><div class="num">{{ dsnagg.merged_recipient_count }}</div><div class="label">已归并报告</div></div>
+        <div class="stat"><div class="num {% if dsnagg.unmerged_count %}warn{% endif %}">{{ dsnagg.unmerged_count }}</div><div class="label">未归并（缺失 / 重复标识、待核对）</div></div>
+        <div class="stat"><div class="num {% if dsnagg.conflict_count %}error{% endif %}">{{ dsnagg.conflict_count }}</div><div class="label">结案后冲突</div></div>
+      </div>
+
+      {% if dsnagg.message_errors %}
+      <div class="card">
+        <h2>未参与归并的邮件（无 message/delivery-status 部分）</h2>
+        <ul class="msgerr-list">
+          {% for me in dsnagg.message_errors %}
+          <li>第 {{ me.index }} 封：{{ me.error }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {% if dsnagg.groups %}
+      <div class="dsn-list">
+        {% for g in dsnagg.groups %}
+        <div class="dsn-row {{ g.final_result }}{% if g.conflict %} conflict{% endif %}">
+          <div class="hop-head">
+            <span class="trust-idx">组 {{ g.index }}</span>
+            <span class="dsn-badge {{ g.final_result }}" title="{{ g.final_label }}">
+              {%- if g.final_result == 'success' %}✅ 成功
+              {%- elif g.final_result == 'deferred' %}⏳ 暂缓
+              {%- else %}⛔ 永久失败{% endif -%}
+            </span>
+            {% if g.conflict %}<span class="dsn-badge conflict">⚠ 结案后冲突</span>{% endif %}
+            <span class="hint">{{ g.final_label }}{% if not g.closed %}（未结案）{% endif %}</span>
+            <span class="dsn-addr">{{ g.final_recipient or g.key.final_recipient_raw }}</span>
+          </div>
+          <div class="dsn-fields">
+            <div><span class="k">Original-Envelope-Id</span><code>{{ g.key.original_envelope_id }}</code></div>
+            <div><span class="k">Final-Recipient 原值</span><code>{{ g.key.final_recipient_raw }}</code></div>
+            <div><span class="k">来源邮件序号</span>
+              {% for i in g.source_indexes %}#{{ i }}{% if not loop.last %}、{% endif %}{% endfor %}
+            </div>
+            <div><span class="k">轨迹次数</span>{{ g.event_count }}</div>
+          </div>
+
+          {% if g.conflicts %}
+          <ul class="anomalies">
+            {% for c in g.conflicts %}
+            <li class="error">⛔ 第 {{ c.email_index }} 封（该封收件人 #{{ c.recipient_index }}）：{{ c.reason }}</li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+
+          <div class="dsn-trajectory">
+            {% for ev in g.events %}
+            <div class="dsn-event">
+              <div class="hop-head">
+                <span class="hop-idx">第 {{ ev.email_index }} 封</span>
+                <span class="dsn-badge {{ ev.result }}" title="{{ ev.result_label }}">
+                  {%- if ev.result == 'success' %}✅ 成功
+                  {%- elif ev.result == 'deferred' %}⏳ 暂缓
+                  {%- else %}⛔ 永久失败{% endif -%}
+                </span>
+                <span class="hint">该封收件人 #{{ ev.recipient_index }}</span>
+                {% if ev.status %}<span class="hint">Status <code>{{ ev.status }}</code></span>{% endif %}
+                {% if ev.action %}<span class="hint">Action <code>{{ ev.action }}</code></span>{% endif %}
+              </div>
+              <div class="dsn-diag">
+                <span class="k">Diagnostic-Code：</span>
+                {% if ev.diagnostic_code %}{{ ev.diagnostic_raw }}
+                {% else %}<span style="color:var(--muted);">该次报告块未提供 Diagnostic-Code</span>{% endif %}
+              </div>
+              <details>
+                <summary>查看该次报告块原文（保留折行）</summary>
+                <pre class="raw">{{ ev.raw_block }}</pre>
+              </details>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="banner">没有可归并的收件人报告（所有报告块均列入未归并清单）。</div>
+      {% endif %}
+
+      {% if dsnagg.unmerged %}
+      <div class="card">
+        <h2>🧾 未归并清单（{{ dsnagg.unmerged_count }}：缺失 / 重复标识或待核对，不凭收件地址单独合并）</h2>
+        <div class="dsn-list">
+          {% for u in dsnagg.unmerged %}
+          <div class="dsn-row review">
+            <div class="hop-head">
+              <span class="trust-idx">第 {{ u.email_index }} 封 · 收件人 #{{ u.recipient_index }}</span>
+              <span class="dsn-badge {{ u.result }}" title="{{ u.result_label }}">
+                {%- if u.result == 'success' %}✅ 成功
+                {%- elif u.result == 'deferred' %}⏳ 暂缓
+                {%- elif u.result == 'permanent' %}⛔ 永久失败
+                {%- else %}🔍 待核对{% endif -%}
+              </span>
+              <span class="dsn-addr">{{ u.final_recipient or '（未解析到收件人地址）' }}</span>
+              {% if u.final_recipient_raw %}<span class="hint">原值：<code>{{ u.final_recipient_raw }}</code></span>{% endif %}
+            </div>
+            <ul class="dsn-reasons">
+              {% for reason in u.reasons %}<li>🔍 {{ reason }}</li>{% endfor %}
+            </ul>
+            <details>
+              <summary>查看该收件人报告块原文（保留折行）</summary>
+              <pre class="raw">{{ u.raw_block }}</pre>
+            </details>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <p class="legend">{{ dsnagg.notice }}</p>
+    {% endif %}
+  {% endif %}
+
   {% if compare %}
     {% if compare.error %}
       <div class="banner">{{ compare.error }}</div>
@@ -1788,6 +1948,15 @@
   document.getElementById('clearDsn').addEventListener('click', () => {
     taDsn.value = '';
     taDsn.focus();
+  });
+
+  const taDsnAgg = document.getElementById('source_dsn_aggregate');
+  document.getElementById('fillDsnAggSample').addEventListener('click', () => {
+    taDsnAgg.value = {{ sample_dsn_aggregate | tojson }};
+  });
+  document.getElementById('clearDsnAgg').addEventListener('click', () => {
+    taDsnAgg.value = '';
+    taDsnAgg.focus();
   });
 
   const taArc = document.getElementById('headers_arc');

@@ -102,6 +102,18 @@
   **绝不把整封回执归为单一结果**。页面与 JSON 均逐收件人展示状态、
   四字段原文与诊断原文（保留折行）；邮件中没有投递状态部分时返回
   明确错误（400）。
+- **多封退信回执归并**：页面 **“多封退信回执归并”** 区域一次粘贴**多封**
+  完整原始退信邮件（沿用 `===== 下一封邮件 =====` 分隔行），或调用
+  `POST /api/dsn/aggregate`（`sources` 字符串数组，一封一个元素）。
+  系统复用单封判读结果，对每个收件人报告块，以其所属投递状态部分中
+  **唯一且非空**的 `Original-Envelope-Id` 与 `Final-Recipient` **原值**
+  组成**投递键**归并同一投递的多次回执；**缺失 / 重复标识**与**待核对块**
+  列入**未归并清单**并逐条说明原因，**不凭收件地址单独合并**。每组按
+  输入顺序展示状态轨迹：**暂缓**可由后续**成功 / 永久失败结案**；结案后
+  再出现不同类别（如永久失败后又报告成功）标为**冲突**并保留原结案状态，
+  **不静默覆盖**。页面与 JSON 均展示每组最终状态、来源邮件序号与逐次证据
+  （各次报告块原文）；某封邮件没有投递状态部分时**单独报错**，其余邮件
+  仍参与归并。
 
 解析核心（`mailtrace/`）仅依赖 Python 标准库，可脱离 Flask 单独使用或被其他程序导入。
 
@@ -141,13 +153,14 @@ docker build -t mailtrace . && docker run --rm -p 8000:8000 mailtrace
 
 | 用途 | 地址（默认 `http://localhost:8000`） |
 | --- | --- |
-| 页面（投递路径 / 对照 / 慢段归因 / 会话关系 / ARC / DKIM 覆盖 / 可信边界 / 认证结果来源 / 发件域对齐 / 退信回执判读） | `http://localhost:8000/` |
+| 页面（投递路径 / 对照 / 慢段归因 / 会话关系 / ARC / DKIM 覆盖 / 可信边界 / 认证结果来源 / 发件域对齐 / 退信回执判读 / 多封退信归并） | `http://localhost:8000/` |
 | 单份头部分析 | `POST http://localhost:8000/api/analyze` |
 | 脱敏分享报告 | `POST http://localhost:8000/api/analyze/share` |
 | **接收链可信边界** | `POST http://localhost:8000/api/analyze/trust-boundary` |
 | **认证结果来源** | `POST http://localhost:8000/api/analyze/auth-results` |
 | **发件域对齐审计** | `POST http://localhost:8000/api/analyze/sender-alignment` |
 | **退信回执判读（DSN）** | `POST http://localhost:8000/api/dsn/inspect` |
+| **多封退信回执归并** | `POST http://localhost:8000/api/dsn/aggregate` |
 | 双邮件头路径对照 | `POST http://localhost:8000/api/compare` |
 | 多封慢段归因 | `POST http://localhost:8000/api/batch-delays` |
 | **邮件会话关系（引用树）** | `POST http://localhost:8000/api/thread-relations` |
@@ -225,6 +238,14 @@ docker build -t mailtrace . && docker run --rm -p 8000:8000 mailtrace
     `Status` 缺失或与 `Action` 矛盾的收件人单独标为**待核对**，
     每个收件人都可展开查看其报告块原文。只粘贴退信的文字说明、
     或原信头部（没有 `message/delivery-status` 部分）时页面明确报错。
+13. 需要把**同一投递的多封退信回执合并**时，在 **“🗂️ 多封退信回执归并”**
+    区域粘贴多封完整原始退信邮件，邮件之间沿用分隔行
+    `===== 下一封邮件 =====`（可点“填入示例”查看暂缓后结案、结案后冲突、
+    缺标识未归并、无投递状态部分单独报错等样例），点击
+    **归并退信回执（多封）**：页面按投递键（`Original-Envelope-Id` +
+    `Final-Recipient` 原值）逐组展示最终状态、来源邮件序号与按输入顺序
+    排列的状态轨迹（含各次报告块原文），并单独列出未归并清单
+    （缺失 / 重复标识、待核对块）与未参与归并的邮件。
 
 慢段归因的聚合口径：
 
@@ -904,6 +925,88 @@ curl -s -X POST http://localhost:8000/api/analyze/sender-alignment \
   （包括只粘贴 `text/plain` 退信说明或原信头部）时返回 **400** 及
   `error` 明确说明；含投递状态部分时，无论其中收件人是哪种结果均为 200。
 
+多封退信回执归并（本地启动后地址为
+`http://localhost:8000/api/dsn/aggregate`，端口随 `HOST_PORT` 变化，
+见下文“访问端口”）。接收 JSON 对象
+`{"sources": ["完整原始退信邮件", ...]}`（字符串数组，一封一个元素，
+至少一封；页面粘贴文本沿用批量分隔行，切分在页面端完成）。系统逐封复用
+`/api/dsn/inspect` 的判读结果，按**投递键**（所属投递状态部分中唯一且
+非空的 `Original-Envelope-Id` + `Final-Recipient` 原值）归并：
+
+```bash
+curl -s -X POST http://localhost:8000/api/dsn/aggregate \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "sources": [
+          "Content-Type: multipart/report; report-type=delivery-status; boundary=\"A\"\n\n--A\nContent-Type: message/delivery-status\n\nReporting-MTA: dns;mx.example\nOriginal-Envelope-Id: QID-1\n\nFinal-Recipient: rfc822; alice@example.com\nAction: delayed\nStatus: 4.7.1\n\n--A--\n",
+          "Content-Type: multipart/report; report-type=delivery-status; boundary=\"B\"\n\n--B\nContent-Type: message/delivery-status\n\nReporting-MTA: dns;mx.example\nOriginal-Envelope-Id: QID-1\n\nFinal-Recipient: rfc822; alice@example.com\nAction: delivered\nStatus: 2.0.0\n\n--B--\n"
+        ]
+      }'
+```
+
+返回结果（节选，页面与 JSON 共用同一结构）：
+
+```json
+{
+  "message_count": 2,
+  "inspected_count": 2,
+  "message_errors": [],
+  "recipient_total": 2,
+  "merged_recipient_count": 2,
+  "group_count": 1,
+  "unmerged_count": 0,
+  "conflict_count": 0,
+  "groups": [
+    {
+      "index": 1,
+      "key": {"original_envelope_id": "QID-1",
+              "final_recipient_raw": "rfc822; alice@example.com"},
+      "final_recipient": "alice@example.com",
+      "recipient_type": "rfc822",
+      "source_indexes": [1, 2],
+      "event_count": 2,
+      "final_result": "success",
+      "final_label": "成功（投递成功）",
+      "closed": true,
+      "conflict": false,
+      "conflicts": [],
+      "events": [
+        {"email_index": 1, "recipient_index": 1, "dsn_part": 1,
+         "result": "deferred", "result_label": "暂缓（临时失败，仍可能重试）",
+         "action": "delayed", "status": "4.7.1", "status_class": "4",
+         "diagnostic_code": "...", "raw_fields": {"...": "..."},
+         "raw_block": "Final-Recipient: rfc822; alice@example.com\n..."},
+        {"email_index": 2, "recipient_index": 1, "dsn_part": 1,
+         "result": "success", "action": "delivered", "status": "2.0.0",
+         "...": "..."}
+      ]
+    }
+  ],
+  "unmerged": [],
+  "notice": "归并以投递键……不静默覆盖。"
+}
+```
+
+- **投递键**：`Original-Envelope-Id` 取自该收件人**所属投递状态部分**的
+  每消息字段块（必须恰好出现一次且非空），`Final-Recipient` 取折行展开
+  后的**原值**（含地址类型前缀，大小写保持原文）；地址相同但信封标识
+  不同的报告**各自成组**，绝不只凭收件地址合并。
+- **未归并清单**（`unmerged`）：待核对块（沿用单封判读的
+  `review_reasons`）、所属部分缺少 / 重复 `Original-Envelope-Id`、
+  标识为空或 `Final-Recipient` 原值为空的报告块，均附逐条 `reasons`
+  与报告块原文（`raw_block`），并标明来源邮件序号与该封内收件人序号。
+- **状态轨迹**：每组 `events` 按输入顺序（邮件序号 → 该封内收件人序号）
+  排列；暂缓（`deferred`）之后的首个成功 / 永久失败使轨迹**结案**
+  （`closed=true`，`final_result` 随之确定）；结案后再出现**不同类别**
+  记入 `conflicts`（`conflict=true`），最终状态保持结案值**不被覆盖**；
+  同类别的重复报告视为重复确认，不算冲突。`final_result` 为
+  `success` / `deferred` / `permanent` 之一（`deferred` 表示始终未结案）。
+- **逐封容错**：某封邮件没有 `message/delivery-status` 部分时记入
+  `message_errors`（含其在数组中的序号），其余邮件照常归并；
+  **所有**邮件都没有投递状态部分时返回 **400** 及 `error`。
+- 输入限制与 `/api/batch-delays` 一致：必须是 JSON 对象且 `sources`
+  为字符串数组、无空白项、至少一封（每封单独受 `MAX_INPUT_KB` 限制）。
+
 健康检查：`GET http://localhost:8000/healthz`。
 
 ---
@@ -989,13 +1092,14 @@ python -m unittest discover -s tests -v
 │       ├── authres.py      # 认证结果来源：AR 归属紧邻 Received、可信前缀 + authserv-id 判定
 │       ├── align.py        # 发件域对齐审计：唯一 From 域、spf/dkim pass 身份域、严格/宽松比较
 │       ├── dsn.py          # 退信回执判读：标准库解析 MIME，只读 message/delivery-status，逐收件人 2/4/5 分类
-│       └── sample.py       # 页面“填入示例”数据（A / B、批量三份、会话关系、ARC、DKIM、可信边界、认证结果来源、发件域对齐及 DSN 退信示例）
+│       ├── dsnagg.py       # 多封退信归并：投递键（Original-Envelope-Id + Final-Recipient 原值）分组、状态轨迹结案 / 冲突、未归并清单
+│       └── sample.py       # 页面“填入示例”数据（A / B、批量三份、会话关系、ARC、DKIM、可信边界、认证结果来源、发件域对齐、DSN 退信及多封归并示例）
 ├── wsgi.py                 # gunicorn / flask 启动入口
 ├── entrypoint.sh           # 容器启动时安装依赖并启动 gunicorn
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-└── tests/                  # 解析核心、对照、脱敏、慢段归因、会话关系、ARC 链、DKIM 覆盖、可信边界、认证结果来源、发件域对齐与退信回执判读单元测试
+└── tests/                  # 解析核心、对照、脱敏、慢段归因、会话关系、ARC 链、DKIM 覆盖、可信边界、认证结果来源、发件域对齐、退信回执判读与多封归并单元测试
     ├── test_parser.py
     ├── test_compare.py
     ├── test_share.py
@@ -1004,6 +1108,7 @@ python -m unittest discover -s tests -v
     ├── test_arc.py
     ├── test_dkim.py
     ├── test_dsn.py
+    ├── test_dsnagg.py
     ├── test_trust.py
     ├── test_authres.py
     └── test_align.py

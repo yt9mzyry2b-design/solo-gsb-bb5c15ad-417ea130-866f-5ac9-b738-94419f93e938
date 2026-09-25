@@ -411,6 +411,137 @@ original message body...
 """
 
 
+# 多封退信回执归并示例：六封邮件用页面规范分隔行分开，覆盖
+# - 邮件 1（QID-001）：alice 暂缓（4.7.1）、bob 永久失败（5.1.1）；
+# - 邮件 2（QID-001）：alice 投递成功（2.0.0）——暂缓后由成功结案；
+# - 邮件 3（QID-001）：bob 又报告成功（2.0.0）——已结案为永久失败后
+#   出现不同类别，标为冲突，不覆盖结案状态；
+# - 邮件 4（QID-002）：carol 永久失败（5.7.1）——信封标识不同，单独成组；
+# - 邮件 5：每消息字段块缺少 Original-Envelope-Id，dave 无法组成投递键
+#   列入未归并；weird 的 Action=failed 与 Status=4.4.1 矛盾，属待核对块，
+#   同样列入未归并；
+# - 邮件 6：纯文字退信说明，没有 message/delivery-status 部分，
+#   单独报错，其余邮件照常归并。
+SAMPLE_DSN_AGGREGATE = """\
+From: Mail Delivery System <mailer-daemon@mx.final.example>
+To: <sender@origin.example>
+Subject: Delivery Status Notification (Delay)
+Auto-Submitted: auto-replied
+Content-Type: multipart/report; report-type=delivery-status;
+\tboundary="AGG1"
+
+--AGG1
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns;mx.final.example
+Original-Envelope-Id: QID-001
+Arrival-Date: Fri, 25 Sep 2026 05:00:10 +0000
+
+Final-Recipient: rfc822; alice@final.example
+Action: delayed
+Status: 4.7.1
+Diagnostic-Code: smtp;450 4.7.1 mailbox temporarily busy; will retry
+
+Final-Recipient: rfc822; bob@final.example
+Action: failed
+Status: 5.1.1
+Diagnostic-Code: smtp;550 5.1.1 <bob@final.example> user doesn't exist
+
+--AGG1--
+===== 下一封邮件 =====
+From: Mail Delivery System <mailer-daemon@mx.final.example>
+To: <sender@origin.example>
+Subject: Delivery Status Notification (Success)
+Auto-Submitted: auto-replied
+Content-Type: multipart/report; report-type=delivery-status;
+\tboundary="AGG2"
+
+--AGG2
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns;mx.final.example
+Original-Envelope-Id: QID-001
+
+Final-Recipient: rfc822; alice@final.example
+Action: delivered
+Status: 2.0.0
+Diagnostic-Code: smtp;250 2.0.0 message accepted for delivery
+
+--AGG2--
+===== 下一封邮件 =====
+From: Mail Delivery System <mailer-daemon@mx.final.example>
+To: <sender@origin.example>
+Subject: Delivery Status Notification (Success)
+Auto-Submitted: auto-replied
+Content-Type: multipart/report; report-type=delivery-status;
+\tboundary="AGG3"
+
+--AGG3
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns;mx.final.example
+Original-Envelope-Id: QID-001
+
+Final-Recipient: rfc822; bob@final.example
+Action: delivered
+Status: 2.0.0
+Diagnostic-Code: smtp;250 2.0.0 message accepted for delivery
+
+--AGG3--
+===== 下一封邮件 =====
+From: Mail Delivery System <mailer-daemon@mx.final.example>
+To: <sender@origin.example>
+Subject: Delivery Status Notification (Failure)
+Auto-Submitted: auto-replied
+Content-Type: multipart/report; report-type=delivery-status;
+\tboundary="AGG4"
+
+--AGG4
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns;mx.final.example
+Original-Envelope-Id: QID-002
+
+Final-Recipient: rfc822; carol@final.example
+Action: failed
+Status: 5.7.1
+Diagnostic-Code: smtp;554 5.7.1 message rejected by local policy
+
+--AGG4--
+===== 下一封邮件 =====
+From: Mail Delivery System <mailer-daemon@mx.final.example>
+To: <sender@origin.example>
+Subject: Delivery Status Notification (Failure)
+Auto-Submitted: auto-replied
+Content-Type: multipart/report; report-type=delivery-status;
+\tboundary="AGG5"
+
+--AGG5
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns;mx.final.example
+
+Final-Recipient: rfc822; dave@final.example
+Action: failed
+Status: 5.1.1
+Diagnostic-Code: smtp;550 5.1.1 mailbox unavailable
+
+Final-Recipient: rfc822; weird@final.example
+Action: failed
+Status: 4.4.1
+Diagnostic-Code: smtp;421 4.4.1 connection timed out (but Action says failed?)
+
+--AGG5--
+===== 下一封邮件 =====
+From: Postmaster <postmaster@mx.final.example>
+To: <sender@origin.example>
+Subject: Delivery problem for erin@final.example
+
+Your message to erin@final.example could not be delivered:
+550 5.1.1 mailbox full. (This notice has no message/delivery-status part.)
+"""
+
+
 # 邮件会话关系示例：多封邮件用页面规范分隔行分开，覆盖
 # - 正常会话树：#1（根）<- #2 <- #3，#3 的 References 跨两封且带折行，
 #   按“末项”连到 #2；#4 缺失 In-Reply-To，回退 References 末项连到 #2；
